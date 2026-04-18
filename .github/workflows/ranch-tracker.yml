@@ -2,6 +2,8 @@ name: Ranch Tracker
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "15 13 * * *"
 
 jobs:
   test-connection:
@@ -21,7 +23,7 @@ jobs:
       - name: Install dependency
         run: python -m pip install -r requirements.txt
 
-      - name: Run test
+      - name: Run tracker
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
