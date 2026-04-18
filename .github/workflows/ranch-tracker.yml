@@ -1,4 +1,4 @@
-name: Test Supabase Connection
+name: Ranch Tracker
 
 on:
   workflow_dispatch:
