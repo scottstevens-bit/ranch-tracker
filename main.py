@@ -10,20 +10,25 @@ def run():
     supabase = create_client(url, key)
 
     listings = fetch_hallhall_listings()
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    run_date = now.date().isoformat()
+
     count = 0
 
     for row in listings:
         row["last_seen_at"] = now_iso
-        row["last_run_date"] = now_iso[:10]
+        row["last_run_date"] = run_date
 
         supabase.table("broker_listings").upsert(
             row,
             on_conflict="broker,listing_fingerprint"
         ).execute()
+
         count += 1
 
     print(f"Saved {count} Hall and Hall listings")
+    print(f"Run date: {run_date}")
 
 if __name__ == "__main__":
     run()
