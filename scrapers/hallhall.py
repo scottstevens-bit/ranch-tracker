@@ -25,8 +25,6 @@ STATE_ABBRS = {"CO", "WY", "MT", "ID"}
 
 PRICE_RE = re.compile(r"\$[\d,]+")
 ACRE_RE = re.compile(r"\b[\d,]+(?:\.\d+)?[±]?\s+(?:Deeded\s+)?Acres?\b", re.IGNORECASE)
-
-# Captures "Beulah, WY" or "Bozeman, Montana"
 LOCATION_RE = re.compile(
     r"\b([A-Z][a-zA-Z.\-'\s]+,\s*(?:CO|WY|MT|ID|Colorado|Wyoming|Montana|Idaho))\b"
 )
@@ -78,10 +76,6 @@ def normalize_location_candidate(text):
     return text
 
 def extract_location_from_summary_line(text):
-    """
-    Best source on Hall and Hall pages:
-    '$3,744,000 Beulah, WY 960± Deeded Acres'
-    """
     if not text:
         return None
 
@@ -89,7 +83,6 @@ def extract_location_from_summary_line(text):
     if not text:
         return None
 
-    # Remove price and acreage chunks, then search what's left
     stripped = PRICE_RE.sub(" ", text)
     stripped = ACRE_RE.sub(" ", stripped)
     stripped = clean_text(stripped)
@@ -103,24 +96,69 @@ def extract_location_from_summary_line(text):
 
     return None
 
+def extract_status_near_h1(soup):
+    """
+    Hall and Hall pages place status near the title area:
+    'For Sale' on active pages and 'Sold' on sold pages.
+    """
+    h1 = soup.find("h1")
+    if not h1:
+        return "unknown"
+
+    nearby_texts = []
+
+    for sibling in h1.previous_siblings:
+        if len(nearby_texts) >= 8:
+            break
+
+        if isinstance(sibling, str):
+            text = clean_text(sibling)
+        else:
+            text = clean_text(sibling.get_text(" ", strip=True))
+
+        if text:
+            nearby_texts.append(text)
+
+    for sibling in h1.next_siblings:
+        if len(nearby_texts) >= 16:
+            break
+
+        if isinstance(sibling, str):
+            text = clean_text(sibling)
+        else:
+            text = clean_text(sibling.get_text(" ", strip=True))
+
+        if text:
+            nearby_texts.append(text)
+
+    joined = " | ".join(nearby_texts).lower()
+
+    if "for sale" in joined:
+        return "active"
+    if "sold" in joined:
+        return "sold"
+
+    # Fallback to full page text if needed
+    page_text = clean_text(soup.get_text(" ", strip=True)) or ""
+    head = page_text[:1200].lower()
+
+    if "for sale" in head:
+        return "active"
+    if "sold" in head:
+        return "sold"
+
+    return "unknown"
+
 def extract_location_near_h1(soup):
-    """
-    Look only at the text immediately following the H1.
-    This avoids broker office locations elsewhere on the page.
-    """
     h1 = soup.find("h1")
     if not h1:
         return None
 
-    # Collect the next few visible text nodes/tags after the H1
     nearby_texts = []
 
-    # Sibling scan is intentionally shallow
     for sibling in h1.next_siblings:
         if len(nearby_texts) >= 12:
             break
-
-        text = None
 
         if isinstance(sibling, str):
             text = clean_text(sibling)
@@ -132,13 +170,11 @@ def extract_location_near_h1(soup):
 
         nearby_texts.append(text)
 
-    # First try to find the combined summary line
     for text in nearby_texts:
         loc = extract_location_from_summary_line(text)
         if loc:
             return loc
 
-    # Then try any short nearby line that contains a location
     for text in nearby_texts:
         match = LOCATION_RE.search(text)
         if match:
@@ -182,6 +218,8 @@ def extract_detail_page(listing_url):
     soup = BeautifulSoup(response.text, "html.parser")
     page_text = soup.get_text(" ", strip=True)
 
+    status = extract_status_near_h1(soup)
+
     title = None
     h1 = soup.find("h1")
     if h1:
@@ -190,10 +228,8 @@ def extract_detail_page(listing_url):
     price_text = None
     acreage_text = None
 
-    # Priority 1: extract from text near the H1/summary area
     city = extract_location_near_h1(soup)
 
-    # Also try to get price + acreage from the same nearby area first
     if h1:
         nearby_texts = []
         for sibling in h1.next_siblings:
@@ -219,7 +255,6 @@ def extract_detail_page(listing_url):
                 if m:
                     acreage_text = clean_text(m.group(0))
 
-    # Priority 2: broader scan for price/acreage only
     if not price_text or not acreage_text:
         for text in soup.stripped_strings:
             t = clean_text(text)
@@ -239,8 +274,6 @@ def extract_detail_page(listing_url):
             if price_text and acreage_text:
                 break
 
-    # Priority 3: fallback location search in body text only if summary-area failed
-    # We avoid the top of the page and broker card by searching for "near X, ST" patterns.
     if not city:
         body_patterns = [
             re.compile(
@@ -256,6 +289,7 @@ def extract_detail_page(listing_url):
                     break
 
     return {
+        "status": status,
         "title": title,
         "price_text": price_text,
         "acreage_text": acreage_text,
@@ -271,6 +305,10 @@ def fetch_hallhall_listings():
 
         for item in links:
             detail = extract_detail_page(item["listing_url"])
+
+            # Only keep active listings
+            if detail["status"] != "active":
+                continue
 
             listings.append({
                 "broker": "Hall and Hall",
