@@ -23,9 +23,26 @@ STATE_NAMES = {
 
 STATE_ABBRS = {"CO", "WY", "MT", "ID"}
 
-LOCATION_PATTERNS = [
-    re.compile(r"\b([A-Z][a-zA-Z.\-'\s]+,\s*(CO|WY|MT|ID))\b"),
-    re.compile(r"\b([A-Z][a-zA-Z.\-'\s]+,\s*(Colorado|Wyoming|Montana|Idaho))\b"),
+PRICE_RE = re.compile(r"\$[\d,]+")
+ACRE_RE = re.compile(r"\b[\d,]+(?:\.\d+)?[±]?\s+(?:Deeded\s+)?Acres?\b", re.IGNORECASE)
+
+# Captures "Beulah, WY" or "Bozeman, Montana"
+LOCATION_RE = re.compile(
+    r"\b([A-Z][a-zA-Z.\-'\s]+,\s*(?:CO|WY|MT|ID|Colorado|Wyoming|Montana|Idaho))\b"
+)
+
+BAD_LOCATION_PHRASES = [
+    "contact the broker",
+    "read bio",
+    "ask ",
+    "questions?",
+    "download brochure",
+    "brokerage disclosure",
+    "information disclaimer",
+    "client stories",
+    "find a property",
+    "sell with us",
+    "contact and offices",
 ]
 
 def clean_text(value):
@@ -33,14 +50,24 @@ def clean_text(value):
         return None
     return " ".join(value.split()).strip()
 
+def normalize_state_name(text):
+    if not text:
+        return text
+    for full, abbr in STATE_NAMES.items():
+        text = re.sub(rf"\b{full}\b", abbr, text)
+    return text
+
 def normalize_location_candidate(text):
+    text = clean_text(text)
     if not text:
         return None
 
-    text = clean_text(text)
+    text = normalize_state_name(text)
+    text = text.replace(" ,", ",").strip(" -|:")
 
-    for full, abbr in STATE_NAMES.items():
-        text = text.replace(full, abbr)
+    lower = text.lower()
+    if any(bad in lower for bad in BAD_LOCATION_PHRASES):
+        return None
 
     if len(text) > 60:
         return None
@@ -50,14 +77,75 @@ def normalize_location_candidate(text):
 
     return text
 
-def find_location_from_text_chunks(chunks):
-    for chunk in chunks:
-        for pattern in LOCATION_PATTERNS:
-            match = pattern.search(chunk)
-            if match:
-                loc = normalize_location_candidate(match.group(1))
-                if loc:
-                    return loc
+def extract_location_from_summary_line(text):
+    """
+    Best source on Hall and Hall pages:
+    '$3,744,000 Beulah, WY 960± Deeded Acres'
+    """
+    if not text:
+        return None
+
+    text = clean_text(text)
+    if not text:
+        return None
+
+    # Remove price and acreage chunks, then search what's left
+    stripped = PRICE_RE.sub(" ", text)
+    stripped = ACRE_RE.sub(" ", stripped)
+    stripped = clean_text(stripped)
+
+    if not stripped:
+        return None
+
+    match = LOCATION_RE.search(stripped)
+    if match:
+        return normalize_location_candidate(match.group(1))
+
+    return None
+
+def extract_location_near_h1(soup):
+    """
+    Look only at the text immediately following the H1.
+    This avoids broker office locations elsewhere on the page.
+    """
+    h1 = soup.find("h1")
+    if not h1:
+        return None
+
+    # Collect the next few visible text nodes/tags after the H1
+    nearby_texts = []
+
+    # Sibling scan is intentionally shallow
+    for sibling in h1.next_siblings:
+        if len(nearby_texts) >= 12:
+            break
+
+        text = None
+
+        if isinstance(sibling, str):
+            text = clean_text(sibling)
+        else:
+            text = clean_text(sibling.get_text(" ", strip=True))
+
+        if not text:
+            continue
+
+        nearby_texts.append(text)
+
+    # First try to find the combined summary line
+    for text in nearby_texts:
+        loc = extract_location_from_summary_line(text)
+        if loc:
+            return loc
+
+    # Then try any short nearby line that contains a location
+    for text in nearby_texts:
+        match = LOCATION_RE.search(text)
+        if match:
+            loc = normalize_location_candidate(match.group(1))
+            if loc:
+                return loc
+
     return None
 
 def extract_property_links(page_url):
@@ -74,7 +162,6 @@ def extract_property_links(page_url):
             continue
 
         listing_url = urljoin(page_url, href)
-
         if listing_url in seen:
             continue
         seen.add(listing_url)
@@ -98,39 +185,75 @@ def extract_detail_page(listing_url):
     title = None
     h1 = soup.find("h1")
     if h1:
-        title = clean_text(h1.get_text())
+        title = clean_text(h1.get_text(" ", strip=True))
 
     price_text = None
     acreage_text = None
-    city = None
 
-    text_chunks = []
+    # Priority 1: extract from text near the H1/summary area
+    city = extract_location_near_h1(soup)
 
-    for text in soup.stripped_strings:
-        t = clean_text(text)
-        if not t:
-            continue
+    # Also try to get price + acreage from the same nearby area first
+    if h1:
+        nearby_texts = []
+        for sibling in h1.next_siblings:
+            if len(nearby_texts) >= 12:
+                break
 
-        if len(text_chunks) < 150:
-            text_chunks.append(t)
+            if isinstance(sibling, str):
+                text = clean_text(sibling)
+            else:
+                text = clean_text(sibling.get_text(" ", strip=True))
 
-        if not price_text and "$" in t and len(t) < 80:
-            price_text = t
+            if text:
+                nearby_texts.append(text)
 
-        if not acreage_text and "acre" in t.lower() and len(t) < 80:
-            acreage_text = t
+        for text in nearby_texts:
+            if not price_text:
+                m = PRICE_RE.search(text)
+                if m:
+                    price_text = m.group(0)
 
-    # Try structured scan
-    city = find_location_from_text_chunks(text_chunks)
+            if not acreage_text:
+                m = ACRE_RE.search(text)
+                if m:
+                    acreage_text = clean_text(m.group(0))
 
-    # Fallback: search whole page text
+    # Priority 2: broader scan for price/acreage only
+    if not price_text or not acreage_text:
+        for text in soup.stripped_strings:
+            t = clean_text(text)
+            if not t:
+                continue
+
+            if not price_text:
+                m = PRICE_RE.search(t)
+                if m and len(t) < 120:
+                    price_text = m.group(0)
+
+            if not acreage_text:
+                m = ACRE_RE.search(t)
+                if m and len(t) < 120:
+                    acreage_text = clean_text(m.group(0))
+
+            if price_text and acreage_text:
+                break
+
+    # Priority 3: fallback location search in body text only if summary-area failed
+    # We avoid the top of the page and broker card by searching for "near X, ST" patterns.
     if not city:
-        match = re.search(
-            r"\b([A-Z][a-zA-Z.\-'\s]+,\s*(CO|WY|MT|ID|Colorado|Wyoming|Montana|Idaho))\b",
-            page_text
-        )
-        if match:
-            city = normalize_location_candidate(match.group(1))
+        body_patterns = [
+            re.compile(
+                r"\b(?:near|north of|south of|east of|west of|outside|located in|located near|southwest of|northwest of)\s+([A-Z][a-zA-Z.\-'\s]+,\s*(?:CO|WY|MT|ID|Colorado|Wyoming|Montana|Idaho))\b",
+                re.IGNORECASE
+            )
+        ]
+        for pattern in body_patterns:
+            match = pattern.search(page_text)
+            if match:
+                city = normalize_location_candidate(match.group(1))
+                if city:
+                    break
 
     return {
         "title": title,
