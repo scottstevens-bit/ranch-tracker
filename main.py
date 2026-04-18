@@ -1,6 +1,7 @@
 import os
 from datetime import datetime, timezone
 from supabase import create_client
+from scrapers.hallhall import fetch_hallhall_listings
 
 def run():
     url = os.environ["SUPABASE_URL"]
@@ -8,32 +9,21 @@ def run():
 
     supabase = create_client(url, key)
 
+    listings = fetch_hallhall_listings()
     now_iso = datetime.now(timezone.utc).isoformat()
+    count = 0
 
-    row = {
-        "broker": "Test Broker",
-        "source_url": "https://example.com/source",
-        "listing_url": "https://example.com/listing/test-ranch",
-        "title": "Test Ranch Listing",
-        "state": "WY",
-        "city": "Test City",
-        "price_text": "$1,000,000",
-        "acreage_text": "500 acres",
-        "status": "active",
-        "last_seen_at": now_iso,
-        "listing_fingerprint": "test-broker-test-ranch-listing",
-        "raw_json": {
-            "note": "test row from GitHub Actions"
-        }
-    }
+    for row in listings:
+        row["last_seen_at"] = now_iso
+        row["last_run_date"] = now_iso[:10]
 
-    result = supabase.table("broker_listings").upsert(
-        row,
-        on_conflict="broker,listing_fingerprint"
-    ).execute()
+        supabase.table("broker_listings").upsert(
+            row,
+            on_conflict="broker,listing_fingerprint"
+        ).execute()
+        count += 1
 
-    print("Inserted test row")
-    print(result)
+    print(f"Saved {count} Hall and Hall listings")
 
 if __name__ == "__main__":
     run()
