@@ -3,6 +3,7 @@ import re
 from datetime import datetime, timezone
 from supabase import create_client
 from scrapers.hallhall import fetch_hallhall_listings
+from scrapers.broker2 import fetch_broker2_listings
 
 def parse_price(price_text):
     if not price_text:
@@ -47,6 +48,9 @@ def run():
 
     hallhall_listings = fetch_hallhall_listings()
     refresh_broker_listings(supabase, "Hall and Hall", hallhall_listings)
+
+    broker2_listings = fetch_broker2_listings()
+    refresh_broker_listings(supabase, "Fay Ranches", broker2_listings)
 
 if __name__ == "__main__":
     run()
