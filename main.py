@@ -9,6 +9,11 @@ def run():
 
     supabase = create_client(url, key)
 
+    # Clear existing Hall and Hall rows before reload
+    delete_result = supabase.table("broker_listings").delete().eq("broker", "Hall and Hall").execute()
+    print("Deleted existing Hall and Hall rows")
+    print(delete_result)
+
     listings = fetch_hallhall_listings()
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat()
@@ -20,11 +25,7 @@ def run():
         row["last_seen_at"] = now_iso
         row["last_run_date"] = run_date
 
-        supabase.table("broker_listings").upsert(
-            row,
-            on_conflict="broker,listing_fingerprint"
-        ).execute()
-
+        supabase.table("broker_listings").insert(row).execute()
         count += 1
 
     print(f"Saved {count} Hall and Hall listings")
